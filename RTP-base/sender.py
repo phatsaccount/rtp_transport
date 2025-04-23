@@ -20,12 +20,11 @@ def sender(receiver_ip, receiver_port, window_size):
 
     chunks = [msg[i : i + MAX_PACKET] for i in range(0, len(msg), MAX_PACKET)]
 
-    start_pk = PacketHeader(START,seq_num, len(chunks), 0)
-
+    start_pk = PacketHeader(START,seq_num, 0, 0)
     start_pk.checksum = compute_checksum(start_pk)
 
-    s.sendto(start_pk, (receiver_ip, receiver_port))
-    window[seq_num] = start_pk
+    s.sendto(bytes(start_pk), (receiver_ip, receiver_port))
+    window[seq_num] = bytes(start_pk)
     seq_num += 1
 
     pk_nums = len(chunks)
@@ -50,7 +49,7 @@ def sender(receiver_ip, receiver_port, window_size):
                 chunk_indx = next_seq_num - 1
                 data_chunks = chunks[chunk_indx]
 
-                pk_header = PacketHeader(DATA, next_seq_num, len(chunks), 0)
+                pk_header = PacketHeader(DATA, next_seq_num, len(data_chunks), 0)
                 pk_header.checksum = compute_checksum(pk_header / data_chunks)
                 pk = bytes(pk_header / data_chunks)
 
@@ -74,9 +73,9 @@ def sender(receiver_ip, receiver_port, window_size):
                 while time.time() - end_time < 0.5:
                     endAck_pk,_ = s.recvfrom(2048)
                     header_endAck_pk = PacketHeader(endAck_pk[:16])
-                    if header_endAck_pk.type == END and header_endAck_pk.seq_num == pk_nums:
+                    if header_endAck_pk.type == ACK and header_endAck_pk.seq_num == pk_nums:
                         base = pk_nums
-                        s.close()
+                        break
 
         # data ack
         ack_pk,_ = s.recvfrom(2048)
@@ -89,7 +88,7 @@ def sender(receiver_ip, receiver_port, window_size):
                 base = header_ack_pk.seq_num
                 time_start = time.time()
 
-    s.close()     
+    s.close()
 
         
 
