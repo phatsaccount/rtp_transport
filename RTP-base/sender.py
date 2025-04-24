@@ -3,94 +3,78 @@ import socket
 import sys
 import time
 
-from utils import *
+from utils import PacketHeader, compute_checksum
 
 
 def sender(receiver_ip, receiver_port, window_size):
-    TIME_OUT = 0.5
-    MAX_PACKET = 1472
-    window = {}
-    seq_num = 0
-
+    
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    s.settimeout(TIME_OUT)
+    s.settimeout(0.01)
 
-    msg = sys.stdin.buffer.read()
+    message = sys.stdin.buffer.read()
+    max_payload_size = 1456
+    chunks = [message[i:i+max_payload_size] for i in range(0, len(message), max_payload_size)]
 
-    chunks = [msg[i : i + MAX_PACKET] for i in range(0, len(msg), MAX_PACKET)]
-
-    start_pk = PacketHeader(START,seq_num, 0, 0)
-    start_pk.checksum = compute_checksum(start_pk)
-
-    s.sendto(bytes(start_pk), (receiver_ip, receiver_port))
-    window[seq_num] = bytes(start_pk)
-    seq_num += 1
-
-    pk_nums = len(chunks)
     base = 0
-    time_start = time.time()
+    next_seq_num = 0
+    window = {}
+    total_packets = len(chunks) + 2  # START + DATA + END
+    timer_start = time.time()
+
+    # Send START 
+    start_header = PacketHeader(type=0, seq_num=0, length=0)
+    start_header.checksum = compute_checksum(start_header)
+    start_packet = bytes(start_header)
+    s.sendto(start_packet, (receiver_ip, receiver_port))
+    window[0] = start_packet
     next_seq_num = 1
-    
 
-    while  base < pk_nums:
-        time_now = time.time()
+    while base < total_packets:
+        current_time = time.time()
+        # Retransmit
+        if current_time - timer_start >= 0.5:
+            for seq_num in range(base, min(next_seq_num, base + window_size)):
+                if seq_num in window:
+                    s.sendto(window[seq_num], (receiver_ip, receiver_port))
+            timer_start = current_time
 
-        #time out
-        if time_now - time_start >= TIME_OUT:
-            for pks in range(base,min(next_seq_num, base + window_size)):
-                if pks in window:
-                    s.sendto(window[pks], (receiver_ip, receiver_port))
-                
-            time_start = time_now
-        while next_seq_num < base + window_size and next_seq_num < pk_nums:
-            if next_seq_num < pk_nums - 1:
-                #send data
-                chunk_indx = next_seq_num - 1
-                data_chunks = chunks[chunk_indx]
-
-                pk_header = PacketHeader(DATA, next_seq_num, len(data_chunks), 0)
-                pk_header.checksum = compute_checksum(pk_header / data_chunks)
-                pk = bytes(pk_header / data_chunks)
-
-                s.sendto(pk, (receiver_ip, receiver_port))
-
-                window[next_seq_num] = pk
-                next_seq_num += 1
-
-
-            elif next_seq_num == pk_nums - 1:
-                #send end
-
-                end_header = PacketHeader(END, next_seq_num , 0, 0)
+        # Send new packets 
+        while next_seq_num < base + window_size and next_seq_num < total_packets:
+            if next_seq_num == total_packets - 1:
+                # Send END 
+                end_header = PacketHeader(type=1, seq_num=next_seq_num, length=0)
                 end_header.checksum = compute_checksum(end_header)
-                end_pk = bytes(end_header)
-                window[next_seq_num] = end_pk
+                end_packet = bytes(end_header)
+                s.sendto(end_packet, (receiver_ip, receiver_port))
+                window[next_seq_num] = end_packet
                 next_seq_num += 1
-                
-                # end ack
-                end_time = time.time()
-                while time.time() - end_time < 0.5:
-                    endAck_pk,_ = s.recvfrom(2048)
-                    header_endAck_pk = PacketHeader(endAck_pk[:16])
-                    if header_endAck_pk.type == ACK and header_endAck_pk.seq_num == pk_nums:
-                        base = pk_nums
-                        break
+            else:
+                # Send DATA
+                chunk_idx = next_seq_num - 1
+                data_chunk = chunks[chunk_idx]
+                data_header = PacketHeader(type=2, seq_num=next_seq_num, length=len(data_chunk))
+                data_header.checksum = compute_checksum(data_header / data_chunk)
+                data_packet = bytes(data_header / data_chunk)
+                s.sendto(data_packet, (receiver_ip, receiver_port))
+                window[next_seq_num] = data_packet
+                next_seq_num += 1
 
-        # data ack
-        ack_pk,_ = s.recvfrom(2048)
-        header_ack_pk = PacketHeader(ack_pk[:16])
-        if header_ack_pk.type == ACK:
-            if header_ack_pk.seq_num > base:
-                for inx in range(base, header_ack_pk.seq_num):
-                    if inx in window:
-                        del window[inx]
-                base = header_ack_pk.seq_num
-                time_start = time.time()
+        # ACKs
+        try:
+            ack_pkt, _ = s.recvfrom(2048)
+            ack_header = PacketHeader(ack_pkt[:16])
+            if ack_header.type == 3 and ack_header.seq_num > base:
+                for seq_num in range(base, ack_header.seq_num):
+                    if seq_num in window:
+                        del window[seq_num]
+                base = ack_header.seq_num
+                timer_start = time.time()
+        except socket.timeout:
+            pass
+        except ConnectionResetError:
+            pass
 
     s.close()
-
-        
 
 
 def main():

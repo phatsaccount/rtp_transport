@@ -2,90 +2,83 @@ import argparse
 import socket
 import sys
 
-from utils import *
+from utils import PacketHeader, compute_checksum
 
 
 def receiver(receiver_ip, receiver_port, window_size):
-
+    
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.bind((receiver_ip, receiver_port))
-
-    connection = False
+    
+    in_connection = False
     expected_seq_num = 0
-    window = {}
+    buffer = {}
+    end_seq_num = None  # end seq_num
 
     while True:
-        pks,ip = s.recvfrom(2048)
+        pkt, address = s.recvfrom(2048)
+        pkt_header = PacketHeader(pkt[:16])
+        msg = pkt[16:16 + pkt_header.length]
 
-        pks_header = PacketHeader(pks[:16])
-        data = pks[16:16 + pks_header.length]
-        
-        pks_checksum = pks_header.checksum
-        pks_header.checksum = 0
-
-        rev_checksum =  compute_checksum(pks_header / data)
-
-        if pks_checksum != rev_checksum:
+        pkt_checksum = pkt_header.checksum
+        pkt_header.checksum = 0
+        computed_checksum = compute_checksum(pkt_header / msg)
+        if pkt_checksum != computed_checksum:
             continue
 
-        if pks_header.type == START:
-            if connection == False:
-                connection = True
-                expected_seq_num += 1
-                window.clear()
+        if pkt_header.type == 0:  # START
+            if not in_connection:
+                in_connection = True
+                expected_seq_num = 1
+                buffer.clear()
+                end_seq_num = None
 
-                startAck_header = PacketHeader(ACK,pks_header.seq_num + 1,0,0)
-                startAck_header.checksum = compute_checksum(startAck_header)
-                startAck = bytes(startAck_header)
-                s.sendto(startAck, ip)
-            else:
-                pass
+                ack_header = PacketHeader(type=3, seq_num=1, length=0)
+                ack_header.checksum = compute_checksum(ack_header)
+                s.sendto(bytes(ack_header), address)
 
-        elif pks_header.type == END:
-            if connection == True:
-                connection = False
+        elif pkt_header.type == 1:  # END
+            if in_connection == True:
+                end_seq_num = pkt_header.seq_num
+                #
+                ack_header = PacketHeader(type=3, seq_num=end_seq_num + 1, length=0)
+                ack_header.checksum = compute_checksum(ack_header)
+                s.sendto(bytes(ack_header), address)
 
-                endAck_header = PacketHeader(ACK, pks_header.seq_num + 1,0, 0)
-                endAck_header.checksum  = compute_checksum(endAck_header)
-                endAck = bytes(endAck_header)
-                s.sendto(endAck, ip)
-                break
-            else:
-                pass
-
-        elif pks_header.type == DATA:
-            if connection == True:
-                if pks_header.seq_num >= expected_seq_num + window_size:
+        elif pkt_header.type == 2:  # DATA
+            if in_connection == True:
+                if pkt_header.seq_num >= expected_seq_num + window_size:
                     continue
 
-                if pks_header.seq_num > expected_seq_num:
-                    window[pks_header.seq_num] = data
-
-                    ack_header = PacketHeader(type=ACK, seq_num=expected_seq_num, length=0)
-                    ack_header.checksum = compute_checksum(ack_header)
-                    s.sendto(bytes(ack_header), ip)
-
-                elif pks_header.seq_num < expected_seq_num:
-                    ack_header = PacketHeader(type=ACK, seq_num=expected_seq_num, length=0)
-                    ack_header.checksum = compute_checksum(ack_header)
-                    s.sendto(bytes(ack_header), ip)
-
-                elif pks_header.seq_num == expected_seq_num:
-                    sys.stdout.buffer.write(data)
+                if pkt_header.seq_num == expected_seq_num:
+                    sys.stdout.buffer.write(msg)
                     sys.stdout.flush()
-
                     expected_seq_num += 1
-                    if len(window) > 0:
-                        while expected_seq_num in window:
-                            sys.stdout.buffer.write(window[expected_seq_num])
-                            del window[expected_seq_num]
-                            expected_seq_num += 1
-                    else:
-                        pass
-
-                    ack_header = PacketHeader(type=ACK, seq_num=expected_seq_num, length=0)
+                    while expected_seq_num in buffer:
+                        sys.stdout.buffer.write(buffer[expected_seq_num])
+                        sys.stdout.flush()
+                        del buffer[expected_seq_num]
+                        expected_seq_num += 1
+                    ack_header = PacketHeader(type=3, seq_num=expected_seq_num, length=0)
                     ack_header.checksum = compute_checksum(ack_header)
-                    s.sendto(bytes(ack_header), ip)
+                    s.sendto(bytes(ack_header), address)
+                    
+                elif pkt_header.seq_num > expected_seq_num:
+                    buffer[pkt_header.seq_num] = msg
+                    ack_header = PacketHeader(type=3, seq_num=expected_seq_num, length=0)
+                    ack_header.checksum = compute_checksum(ack_header)
+                    s.sendto(bytes(ack_header), address)
+                else:
+                    ack_header = PacketHeader(type=3, seq_num=expected_seq_num, length=0)
+                    ack_header.checksum = compute_checksum(ack_header)
+                    s.sendto(bytes(ack_header), address)
+
+        if end_seq_num is not None and expected_seq_num == end_seq_num:
+            break
+
+    for seq in sorted(buffer):
+        sys.stdout.buffer.write(buffer[seq])
+        sys.stdout.flush()
 
 
 def main():
@@ -106,4 +99,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
